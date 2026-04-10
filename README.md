@@ -1,12 +1,11 @@
 # Strava GPX Uploader
 
-Upload GPX files from Adidas Running (ex Runtastic) to Strava with automatic activity type detection and intelligent gear management.
+Upload GPX files from Adidas Running (ex Runtastic) to Strava with automatic activity type detection.
 
 ## Features
 
 - 🚀 **Batch upload** - Upload entire directories of GPX files
 - 🔍 **Auto-detection** - Automatically infers activity type from Runtastic JSON metadata
-- 👟 **Gear management** - Automatically clears default gear to prevent incorrect tracking
 - 🔄 **Smart retry** - Exponential backoff and automatic retry on failures
 - 📊 **Progress tracking** - Real-time progress with detailed logging
 - 🎯 **Year filtering** - Upload only specific years
@@ -354,7 +353,7 @@ python3 strava_upload_final.py problematic-file.gpx \
 
 ## Contributing
 
-Found a bug or want a feature? Please open an issue or submit a pull request!
+The repo has evident limits. Feel free to make the use you want :)
 
 ## License
 
@@ -362,8 +361,8 @@ This script is provided as-is for personal use. Strava API usage must comply wit
 
 ## Credits
 
-Created for migrating activities from Adidas Running to Strava.
+Special credits to @maxschaffelder repository: https://github.com/maxschaffelder/runtastic-to-strava.git
 
 ---
 
-**Happy uploading! 🚴‍♂️🏃‍♀️**
+**Happy running! 🚴‍♂️🏃‍♀️**
