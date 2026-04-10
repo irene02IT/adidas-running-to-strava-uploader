@@ -1,6 +1,17 @@
+#!/usr/bin/env python3
+"""
+Strava GPX Upload Tool
+
+Upload GPX files from Runtastic to Strava with automatic activity type detection
+and gear management.
+"""
+
 import argparse
 import json
+import logging
 import os
+import re
+import sys
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -27,272 +38,310 @@ RUNTASTIC_TO_STRAVA_TYPE = {
     82: "Trail Run",
 }
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
-def upload_gpx(
-    access_token: str,
-    gpx_path: Path,
-    activity_type: str = "Run",
-    name: Optional[str] = None,
-    description: Optional[str] = None,
-    private: bool = True,
-    trainer: bool = False,
-    commute: bool = False,
-) -> dict:
-    """
-    Upload a GPX file to Strava.
+
+class StravaAPIError(Exception):
+    """Custom exception for Strava API errors."""
+    pass
+
+
+class StravaUploader:
+    """Handle Strava GPX uploads with retry logic and gear management."""
     
-    Args:
-        access_token: Strava OAuth access token
-        gpx_path: Path to the GPX file
-        activity_type: Type of activity (Run, Ride, Walk, etc.)
-        name: Activity name (auto-generated if None)
-        description: Activity description (auto-generated if None)
-        private: Whether the activity should be private
-        trainer: Whether this is a trainer activity
-        commute: Whether this is a commute
+    def __init__(self, access_token: str, verbose: bool = False):
+        """
+        Initialize the Strava uploader.
         
-    Returns:
-        dict: Upload response from Strava API
+        Args:
+            access_token: Strava OAuth access token
+            verbose: Enable verbose logging
+        """
+        self.access_token = access_token
+        self.headers = {"Authorization": f"Bearer {access_token}"}
         
-    Raises:
-        FileNotFoundError: If GPX file doesn't exist
-        requests.HTTPError: If API request fails
-    """
-    if not gpx_path.exists():
-        raise FileNotFoundError(f"GPX file not found: {gpx_path}")
-
-    headers = {"Authorization": f"Bearer {access_token}"}
-
-    # Auto-generate name and description if not provided
-    if name is None:
-        name = f"Imported {activity_type} activity"
-    if description is None:
-        description = f"Imported {activity_type} activity from Runtastic"
-
-    data = {
-        "data_type": "gpx",
-        "activity_type": activity_type,
-        "name": name,
-        "private": int(private),
-        "trainer": int(trainer),
-        "commute": int(commute),
-        "gear_id": "",  # Empty string to prevent default gear assignment (but it doesnt' work)
-    }
-
-    if description:
-        data["description"] = description
-
-    with gpx_path.open("rb") as gpx_file:
-        files = {"file": (gpx_path.name, gpx_file, "application/gpx+xml")}
-        response = requests.post(
-            STRAVA_UPLOAD_URL, headers=headers, files=files, data=data
-        )
-
-    response.raise_for_status()
-    return response.json()
-
-
-def poll_upload_status(
-    access_token: str, upload_id: int, timeout: int = 60, interval: int = 5
-) -> dict:
-    """
-    Poll Strava upload status until processing completes.
+        if verbose:
+            logger.setLevel(logging.DEBUG)
     
-    Args:
-        access_token: Strava OAuth access token
-        upload_id: Upload ID returned from upload_gpx
-        timeout: Maximum time to wait in seconds
-        interval: Time between polls in seconds
+    def upload_gpx(
+        self,
+        gpx_path: Path,
+        activity_type: str = "Run",
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        private: bool = True,
+        trainer: bool = False,
+        commute: bool = False,
+    ) -> dict:
+        """
+        Upload a GPX file to Strava.
         
-    Returns:
-        dict: Upload status from Strava API
-        
-    Raises:
-        TimeoutError: If processing doesn't complete within timeout
-        requests.HTTPError: If API request fails
-    """
-    headers = {"Authorization": f"Bearer {access_token}"}
-    url = STRAVA_UPLOAD_STATUS_URL.format(upload_id=upload_id)
-    deadline = time.time() + timeout
-    backoff = interval
+        Args:
+            gpx_path: Path to the GPX file
+            activity_type: Type of activity (Run, Ride, Walk, etc.)
+            name: Activity name (auto-generated if None)
+            description: Activity description (auto-generated if None)
+            private: Whether the activity should be private
+            trainer: Whether this is a trainer activity
+            commute: Whether this is a commute
+            
+        Returns:
+            dict: Upload response from Strava API
+            
+        Raises:
+            FileNotFoundError: If GPX file doesn't exist
+            StravaAPIError: If API request fails
+        """
+        if not gpx_path.exists():
+            raise FileNotFoundError(f"GPX file not found: {gpx_path}")
 
-    while time.time() < deadline:
+        # Auto-generate name and description if not provided
+        if name is None:
+            name = f"Imported {activity_type} activity"
+        if description is None:
+            description = f"Imported {activity_type} activity from Runtastic"
+
+        data = {
+            "data_type": "gpx",
+            "activity_type": activity_type,
+            "name": name,
+            "private": int(private),
+            "trainer": int(trainer),
+            "commute": int(commute),
+            # Note: gear_id cannot be set during upload, must be cleared via update API
+        }
+
+        if description:
+            data["description"] = description
+
         try:
-            response = requests.get(url, headers=headers)
-
-            # Handle rate limiting with exponential backoff
-            if response.status_code == 429:
-                print(f"Rate limited (429). Waiting {backoff}s before retry...")
-                time.sleep(backoff)
-                backoff = min(backoff * 1.5, 30)  # Max 30s backoff
-                continue
-
+            with gpx_path.open("rb") as gpx_file:
+                files = {"file": (gpx_path.name, gpx_file, "application/gpx+xml")}
+                response = requests.post(
+                    STRAVA_UPLOAD_URL, 
+                    headers=self.headers, 
+                    files=files, 
+                    data=data,
+                    timeout=30
+                )
             response.raise_for_status()
-            status_data = response.json()
-
-            # Check if processing is complete
-            if status_data.get("activity_id") is not None:
-                return status_data
-
-            # Check for error status
-            status_msg = status_data.get("status", "")
-            if status_msg and "still being processed" not in status_msg:
-                return status_data
-
-            time.sleep(interval)
-
+            return response.json()
+            
         except requests.exceptions.RequestException as e:
-            if "429" not in str(e):
-                raise
+            raise StravaAPIError(f"Upload failed: {e}")
 
-    raise TimeoutError(f"Upload status did not complete within {timeout} seconds.")
-
-
-def get_activity(access_token: str, activity_id: int) -> Optional[dict]:
-    """
-    Retrieve a Strava activity by ID.
-    
-    Args:
-        access_token: Strava OAuth access token
-        activity_id: Strava activity ID
+    def poll_upload_status(
+        self, 
+        upload_id: int, 
+        timeout: int = 60, 
+        interval: int = 5
+    ) -> dict:
+        """
+        Poll Strava upload status until processing completes.
         
-    Returns:
-        dict: Activity data, or None if not found
+        Args:
+            upload_id: Upload ID returned from upload_gpx
+            timeout: Maximum time to wait in seconds
+            interval: Time between polls in seconds
+            
+        Returns:
+            dict: Upload status from Strava API
+            
+        Raises:
+            TimeoutError: If processing doesn't complete within timeout
+            StravaAPIError: If API request fails
+        """
+        url = STRAVA_UPLOAD_STATUS_URL.format(upload_id=upload_id)
+        deadline = time.time() + timeout
+        backoff = interval
+
+        while time.time() < deadline:
+            try:
+                response = requests.get(url, headers=self.headers, timeout=10)
+
+                # Handle rate limiting with exponential backoff
+                if response.status_code == 429:
+                    logger.warning(f"Rate limited (429). Waiting {backoff}s before retry...")
+                    time.sleep(backoff)
+                    backoff = min(backoff * 1.5, 30)  # Max 30s backoff
+                    continue
+
+                response.raise_for_status()
+                status_data = response.json()
+
+                # Check if processing is complete
+                if status_data.get("activity_id") is not None:
+                    return status_data
+
+                # Check for error status
+                status_msg = status_data.get("status", "")
+                if status_msg and "still being processed" not in status_msg:
+                    return status_data
+
+                logger.debug(f"Upload still processing... ({status_msg})")
+                time.sleep(interval)
+
+            except requests.exceptions.RequestException as e:
+                if "429" not in str(e):
+                    raise StravaAPIError(f"Status check failed: {e}")
+
+        raise TimeoutError(f"Upload status did not complete within {timeout} seconds.")
+
+    def get_activity(self, activity_id: int) -> Optional[dict]:
+        """
+        Retrieve a Strava activity by ID.
         
-    Raises:
-        requests.HTTPError: If API request fails (except 404)
-    """
-    url = STRAVA_ACTIVITY_URL.format(activity_id=activity_id)
-    headers = {"Authorization": f"Bearer {access_token}"}
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
+        Args:
+            activity_id: Strava activity ID
+            
+        Returns:
+            dict: Activity data, or None if not found
+        """
+        url = STRAVA_ACTIVITY_URL.format(activity_id=activity_id)
         
-        if response.status_code == 404:
-            return None
-        
-        response.raise_for_status()
-        return response.json()
-        
-    except requests.exceptions.Timeout:
-        print(f"  Timeout while checking activity {activity_id}")
-        return None
-    except requests.exceptions.RequestException as e:
-        print(f"  Error checking activity {activity_id}: {e}")
-        return None
-
-
-def wait_for_activity_existence(
-    access_token: str, activity_id: int, timeout: int = 60, interval: int = 5
-) -> bool:
-    """
-    Wait for an activity to become available in the Strava API.
-    
-    Args:
-        access_token: Strava OAuth access token
-        activity_id: Strava activity ID
-        timeout: Maximum time to wait in seconds
-        interval: Time between checks in seconds
-        
-    Returns:
-        bool: True if activity exists, False if timeout reached
-    """
-    deadline = time.time() + timeout
-    attempt = 0
-    while time.time() < deadline:
-        attempt += 1
-        activity = get_activity(access_token, activity_id)
-        if activity is not None:
-            print(f"Activity {activity_id} is now available (after {attempt} attempts)")
-            return True
-        print(f"Waiting for activity {activity_id} to be available... (attempt {attempt})")
-        time.sleep(interval)
-    return False
-
-
-def update_activity(
-    access_token: str,
-    activity_id: int,
-    name: Optional[str] = None,
-    description: Optional[str] = None,
-    gear_id: Optional[str] = None,
-) -> dict:
-    """
-    Update a Strava activity's metadata.
-    
-    Args:
-        access_token: Strava OAuth access token
-        activity_id: Strava activity ID
-        name: New activity name
-        description: New activity description
-        gear_id: Gear ID (None to clear gear)
-        
-    Returns:
-        dict: Updated activity data
-        
-    Raises:
-        requests.HTTPError: If API request fails
-    """
-    url = STRAVA_ACTIVITY_URL.format(activity_id=activity_id)
-    headers = {"Authorization": f"Bearer {access_token}"}
-
-    data = {}
-    if name is not None:
-        data["name"] = name
-    if description is not None:
-        data["description"] = description
-    if gear_id is None:
-        # Explicitly clear gear to prevent default assignment
-        data["gear_id"] = None
-    else:
-        data["gear_id"] = gear_id
-
-    # Only send request if there's data to update
-    if not data:
-        return {}
-
-    response = requests.put(url, headers=headers, json=data)
-    response.raise_for_status()
-    return response.json()
-
-
-def update_activity_with_retry(
-    access_token: str,
-    activity_id: int,
-    name: Optional[str] = None,
-    description: Optional[str] = None,
-    gear_id: Optional[str] = None,
-    max_retries: int = 3,
-) -> dict:
-    """
-    Update a Strava activity with retries to handle delayed processing.
-    
-    Args:
-        access_token: Strava OAuth access token
-        activity_id: Strava activity ID
-        name: New activity name
-        description: New activity description
-        gear_id: Gear ID (None to clear gear)
-        max_retries: Maximum number of retry attempts
-        
-    Returns:
-        dict: Updated activity data
-        
-    Raises:
-        Exception: If all retries fail
-    """
-    wait_times = [3, 5, 10]  # Progressive wait times
-
-    for attempt in range(max_retries):
         try:
-            return update_activity(access_token, activity_id, name, description, gear_id)
-        except Exception as ex:
-            if attempt < max_retries - 1:
-                wait_time = wait_times[attempt]
-                print(f"Retry {attempt + 1}/{max_retries} after {wait_time}s: {ex}")
-                time.sleep(wait_time)
-            else:
-                raise
+            response = requests.get(url, headers=self.headers, timeout=10)
+            
+            if response.status_code == 404:
+                return None
+            
+            response.raise_for_status()
+            return response.json()
+            
+        except requests.exceptions.Timeout:
+            logger.debug(f"Timeout while checking activity {activity_id}")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.debug(f"Error checking activity {activity_id}: {e}")
+            return None
+
+    def wait_for_activity(
+        self, 
+        activity_id: int, 
+        timeout: int = 120, 
+        initial_interval: int = 2
+    ) -> bool:
+        """
+        Wait for an activity to become available in the Strava API.
+        Uses exponential backoff to reduce API calls.
+        
+        Args:
+            activity_id: Strava activity ID
+            timeout: Maximum time to wait in seconds
+            initial_interval: Initial time between checks in seconds
+            
+        Returns:
+            bool: True if activity exists, False if timeout reached
+        """
+        deadline = time.time() + timeout
+        attempt = 0
+        current_interval = initial_interval
+        
+        while time.time() < deadline:
+            attempt += 1
+            activity = self.get_activity(activity_id)
+            
+            if activity is not None:
+                logger.info(f"Activity {activity_id} available after {attempt} attempts")
+                return True
+            
+            remaining = int(deadline - time.time())
+            logger.debug(f"Waiting for activity {activity_id}... (attempt {attempt}, {remaining}s remaining)")
+            
+            time.sleep(current_interval)
+            # Exponential backoff: 2s -> 4s -> 8s -> 10s (max)
+            current_interval = min(current_interval * 2, 10)
+        
+        return False
+
+    def update_activity(
+        self,
+        activity_id: int,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        gear_id: Optional[str] = None,
+    ) -> dict:
+        """
+        Update a Strava activity's metadata.
+        
+        Args:
+            activity_id: Strava activity ID
+            name: New activity name
+            description: New activity description
+            gear_id: Gear ID (None to clear gear)
+            
+        Returns:
+            dict: Updated activity data
+            
+        Raises:
+            StravaAPIError: If API request fails
+        """
+        url = STRAVA_ACTIVITY_URL.format(activity_id=activity_id)
+
+        data = {}
+        if name is not None:
+            data["name"] = name
+        if description is not None:
+            data["description"] = description
+        if gear_id is None:
+            # Explicitly clear gear to prevent default assignment
+            data["gear_id"] = None
+        else:
+            data["gear_id"] = gear_id
+
+        # Only send request if there's data to update
+        if not data:
+            return {}
+
+        try:
+            response = requests.put(url, headers=self.headers, json=data, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            raise StravaAPIError(f"Update failed: {e}")
+
+    def update_activity_with_retry(
+        self,
+        activity_id: int,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        gear_id: Optional[str] = None,
+        max_retries: int = 3,
+    ) -> dict:
+        """
+        Update a Strava activity with retries to handle delayed processing.
+        
+        Args:
+            activity_id: Strava activity ID
+            name: New activity name
+            description: New activity description
+            gear_id: Gear ID (None to clear gear)
+            max_retries: Maximum number of retry attempts
+            
+        Returns:
+            dict: Updated activity data
+            
+        Raises:
+            StravaAPIError: If all retries fail
+        """
+        wait_times = [3, 5, 10]  # Progressive wait times
+
+        for attempt in range(max_retries):
+            try:
+                return self.update_activity(activity_id, name, description, gear_id)
+            except StravaAPIError as ex:
+                if attempt < max_retries - 1:
+                    wait_time = wait_times[attempt]
+                    logger.warning(f"Retry {attempt + 1}/{max_retries} after {wait_time}s: {ex}")
+                    time.sleep(wait_time)
+                else:
+                    raise
 
 
 def parse_duplicate_activity_id(error_text: Optional[str]) -> Optional[int]:
@@ -308,7 +357,6 @@ def parse_duplicate_activity_id(error_text: Optional[str]) -> Optional[int]:
     if not error_text:
         return None
 
-    import re
     match = re.search(r"/activities/(\d+)", error_text)
     if match:
         try:
@@ -382,7 +430,7 @@ def infer_activity_type_from_json(
             return activity_type, json_path
 
         except (json.JSONDecodeError, IOError) as e:
-            print(f"Warning: Could not read {json_path}: {e}")
+            logger.debug(f"Could not read {json_path}: {e}")
             continue
 
     return None, None
@@ -409,7 +457,7 @@ def find_gpx_files(directory: Path, year: Optional[int] = None) -> list[Path]:
 
 
 def upload_single_file(
-    access_token: str,
+    uploader: StravaUploader,
     gpx_path: Path,
     activity_type: Optional[str] = None,
     name: Optional[str] = None,
@@ -420,12 +468,13 @@ def upload_single_file(
     timeout: int = 60,
     json_dir: Optional[Path] = None,
     skip_metadata_update: bool = False,
-) -> None:
+    wait_timeout: int = 120,
+) -> bool:
     """
     Upload a single GPX file to Strava.
     
     Args:
-        access_token: Strava OAuth access token
+        uploader: StravaUploader instance
         gpx_path: Path to the GPX file
         activity_type: Type of activity (inferred if None)
         name: Activity name
@@ -436,8 +485,12 @@ def upload_single_file(
         timeout: Upload status polling timeout
         json_dir: Directory containing JSON metadata files
         skip_metadata_update: Skip metadata update after upload
+        wait_timeout: Seconds to wait for activity availability
+        
+    Returns:
+        bool: True if upload succeeded, False otherwise
     """
-    print(f"\nUploading {gpx_path.name}...")
+    logger.info(f"Uploading {gpx_path.name}...")
 
     # Infer activity type from JSON metadata if not provided
     inferred_activity_type, json_path = infer_activity_type_from_json(
@@ -446,12 +499,11 @@ def upload_single_file(
     selected_activity_type = activity_type or inferred_activity_type or "Run"
 
     if activity_type is None and inferred_activity_type is not None:
-        print(f"Inferred activity type '{selected_activity_type}' from {json_path}")
+        logger.info(f"Inferred activity type '{selected_activity_type}' from {json_path.name}")
 
     try:
         # Upload the GPX file
-        result = upload_gpx(
-            access_token=access_token,
+        result = uploader.upload_gpx(
             gpx_path=gpx_path,
             activity_type=selected_activity_type,
             name=name,
@@ -460,17 +512,17 @@ def upload_single_file(
             trainer=trainer,
             commute=commute,
         )
-        print(f"Upload response: {json.dumps(result, indent=2, ensure_ascii=False)}")
+        logger.debug(f"Upload response: {json.dumps(result, indent=2)}")
 
         upload_id = result.get("id")
         if upload_id is None:
-            print(f"Warning: No upload ID returned for {gpx_path.name}")
-            return
+            logger.error(f"No upload ID returned for {gpx_path.name}")
+            return False
 
         # Poll for upload completion
-        print(f"Upload submitted, upload ID: {upload_id}")
-        status = poll_upload_status(access_token, upload_id, timeout=timeout)
-        print(f"Upload status: {json.dumps(status, indent=2, ensure_ascii=False)}")
+        logger.info(f"Upload submitted, ID: {upload_id}")
+        status = uploader.poll_upload_status(upload_id, timeout=timeout)
+        logger.debug(f"Upload status: {json.dumps(status, indent=2)}")
 
         # Get activity ID
         activity_id = status.get("activity_id")
@@ -480,50 +532,54 @@ def upload_single_file(
             duplicate_id = parse_duplicate_activity_id(status.get("error"))
             if duplicate_id is not None:
                 activity_id = duplicate_id
-                print(f"Duplicate detected, existing activity ID: {activity_id}")
+                logger.warning(f"Duplicate detected, existing activity ID: {activity_id}")
             else:
-                print(f"Warning: No valid activity ID returned for {gpx_path.name}")
-                return
+                logger.error(f"No valid activity ID returned for {gpx_path.name}")
+                return False
 
-        # Wait for activity to be available
+        # Skip metadata update if requested
         if skip_metadata_update:
-            print(f"✓ Successfully uploaded {gpx_path.name} (Activity ID: {activity_id})")
-            print(f"  Metadata update skipped as requested.")
-            return
+            logger.info(f"✓ Uploaded {gpx_path.name} (Activity ID: {activity_id})")
+            logger.info("  Metadata update skipped as requested")
+            return True
             
-        print(f"Waiting for activity {activity_id} to become available...")
-        if not wait_for_activity_existence(access_token, activity_id, timeout=60):
-            print(f"⚠ Warning: Activity {activity_id} did not become available within 60s.")
-            print(f"  The activity was created but metadata update will be skipped.")
-            print(f"  You can manually update the activity on Strava if needed.")
-            print(f"✓ Uploaded {gpx_path.name} (Activity ID: {activity_id})")
-            return
+        # Wait for activity to be available
+        logger.info(f"Waiting for activity {activity_id} to become available...")
+        if not uploader.wait_for_activity(activity_id, timeout=wait_timeout):
+            logger.warning(f"⚠ Activity {activity_id} did not become available within {wait_timeout}s")
+            logger.warning("  The activity was created but gear will NOT be cleared")
+            logger.warning("  You may need to manually remove the default gear on Strava")
+            logger.info(f"✓ Uploaded {gpx_path.name} (Activity ID: {activity_id})")
+            return True
 
-        # Update activity metadata
-        print(f"Activity {activity_id} is ready. Updating metadata...")
-        time.sleep(5)  # Brief pause before updating
+        # Update activity metadata to clear gear
+        logger.info(f"Activity {activity_id} is ready. Clearing default gear...")
+        time.sleep(2)  # Brief pause before updating
 
         try:
-            updated = update_activity_with_retry(
-                access_token=access_token,
+            updated = uploader.update_activity_with_retry(
                 activity_id=activity_id,
                 name=name,
                 description=description,
-                gear_id=None,
+                gear_id=None,  # This is the important part - clears default gear
             )
-            print(f"Updated activity: {json.dumps(updated, indent=2, ensure_ascii=False)}")
-            print(f"✓ Successfully uploaded {gpx_path.name} (Activity ID: {activity_id})")
+            logger.debug(f"Updated activity: {json.dumps(updated, indent=2)}")
+            logger.info(f"✓ Successfully uploaded {gpx_path.name} (Activity ID: {activity_id})")
+            logger.info("  Default gear cleared successfully")
+            return True
 
-        except Exception as update_exc:
-            print(f"Warning: Failed to update activity metadata: {update_exc}")
-            print(f"✓ Uploaded {gpx_path.name} but metadata update failed (Activity ID: {activity_id})")
+        except StravaAPIError as update_exc:
+            logger.warning(f"⚠ Failed to clear gear: {update_exc}")
+            logger.info(f"✓ Uploaded {gpx_path.name} but gear may still be assigned (Activity ID: {activity_id})")
+            return True
 
     except Exception as exc:
-        print(f"✗ Failed to upload {gpx_path.name}: {exc}")
+        logger.error(f"✗ Failed to upload {gpx_path.name}: {exc}")
+        return False
 
 
 def upload_directory(
-    access_token: str,
+    uploader: StravaUploader,
     directory: Path,
     activity_type: Optional[str] = None,
     name: Optional[str] = None,
@@ -535,12 +591,13 @@ def upload_directory(
     year: Optional[int] = None,
     json_dir: Optional[Path] = None,
     skip_metadata_update: bool = False,
-) -> None:
+    wait_timeout: int = 120,
+) -> Tuple[int, int]:
     """
     Upload all GPX files in a directory to Strava.
     
     Args:
-        access_token: Strava OAuth access token
+        uploader: StravaUploader instance
         directory: Directory containing GPX files
         activity_type: Type of activity (inferred if None)
         name: Activity name
@@ -552,6 +609,10 @@ def upload_directory(
         year: Optional year filter for filenames
         json_dir: Directory containing JSON metadata files
         skip_metadata_update: Skip metadata update after upload
+        wait_timeout: Seconds to wait for activity availability
+        
+    Returns:
+        tuple: (success_count, failure_count)
         
     Raises:
         FileNotFoundError: If directory doesn't exist or contains no GPX files
@@ -567,58 +628,59 @@ def upload_directory(
         year_msg = f" for year {year}" if year else ""
         raise FileNotFoundError(f"No GPX files found in {directory}{year_msg}")
 
-    print(f"Found {len(gpx_files)} GPX file(s) to upload")
+    logger.info(f"Found {len(gpx_files)} GPX file(s) to upload")
 
     # Upload each file
     success_count = 0
     failure_count = 0
 
-    for gpx_file in gpx_files:
-        try:
-            upload_single_file(
-                access_token=access_token,
-                gpx_path=gpx_file,
-                activity_type=activity_type,
-                name=name,
-                description=description,
-                private=private,
-                trainer=trainer,
-                commute=commute,
-                timeout=timeout,
-                json_dir=json_dir,
-                skip_metadata_update=skip_metadata_update,
-            )
+    for i, gpx_file in enumerate(gpx_files, 1):
+        logger.info(f"\n[{i}/{len(gpx_files)}] Processing {gpx_file.name}")
+        
+        success = upload_single_file(
+            uploader=uploader,
+            gpx_path=gpx_file,
+            activity_type=activity_type,
+            name=name,
+            description=description,
+            private=private,
+            trainer=trainer,
+            commute=commute,
+            timeout=timeout,
+            json_dir=json_dir,
+            skip_metadata_update=skip_metadata_update,
+            wait_timeout=wait_timeout,
+        )
+        
+        if success:
             success_count += 1
-        except Exception as e:
-            print(f"Error uploading {gpx_file.name}: {e}")
+        else:
             failure_count += 1
 
-    # Summary
-    print(f"\n{'='*60}")
-    print(f"Upload Summary:")
-    print(f"  Successful: {success_count}/{len(gpx_files)}")
-    print(f"  Failed: {failure_count}/{len(gpx_files)}")
-    print(f"{'='*60}")
+    return success_count, failure_count
 
 
-def main() -> None:
+def main() -> int:
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(
-        description="Upload GPX files to Strava",
+        description="Upload GPX files to Strava with automatic activity type detection",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Upload a single GPX file
-  python strava_upload.py /path/to/file.gpx --access-token YOUR_TOKEN
+  %(prog)s /path/to/file.gpx --access-token YOUR_TOKEN
   
   # Upload all GPX files in a directory
-  python strava_upload.py /path/to/directory --access-token YOUR_TOKEN
+  %(prog)s /path/to/directory --access-token YOUR_TOKEN
   
   # Upload only 2024 activities with metadata inference
-  python strava_upload.py ./Sport-sessions/GPS-data --year 2024 --json-dir ./Sport-sessions
+  %(prog)s ./Sport-sessions/GPS-data --year 2024 --json-dir ./Sport-sessions
   
-  # Upload with custom name and description
-  python strava_upload.py file.gpx --name "Morning Run" --description "Great weather!"
+  # Upload with custom name and skip gear update (faster)
+  %(prog)s file.gpx --name "Morning Run" --skip-metadata-update
+  
+  # Increase wait timeout for slow API responses
+  %(prog)s ./Sport-sessions/GPS-data --wait-timeout 180
         """,
     )
 
@@ -692,6 +754,18 @@ Examples:
         action="store_true",
         help="Skip metadata update after upload (faster but won't clear default gear)",
     )
+    parser.add_argument(
+        "--wait-timeout",
+        type=int,
+        default=120,
+        help="Seconds to wait for activity to become available (default: 120)",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose logging (debug mode)",
+    )
 
     args = parser.parse_args()
 
@@ -712,37 +786,66 @@ Examples:
     # Parse json_dir if provided
     json_dir = Path(os.path.expanduser(args.json_dir)) if args.json_dir else None
 
-    # Upload directory or single file
-    if gpx_path.is_dir():
-        upload_directory(
-            access_token=args.access_token,
-            directory=gpx_path,
-            activity_type=args.activity_type,
-            name=args.name,
-            description=args.description,
-            private=args.private,
-            trainer=args.trainer,
-            commute=args.commute,
-            timeout=args.poll_timeout,
-            year=args.year,
-            json_dir=json_dir,
-            skip_metadata_update=args.skip_metadata_update,
-        )
-    else:
-        upload_single_file(
-            access_token=args.access_token,
-            gpx_path=gpx_path,
-            activity_type=args.activity_type,
-            name=args.name,
-            description=args.description,
-            private=args.private,
-            trainer=args.trainer,
-            commute=args.commute,
-            timeout=args.poll_timeout,
-            json_dir=json_dir,
-            skip_metadata_update=args.skip_metadata_update,
-        )
+    # Initialize uploader
+    uploader = StravaUploader(args.access_token, verbose=args.verbose)
+
+    try:
+        # Upload directory or single file
+        if gpx_path.is_dir():
+            success_count, failure_count = upload_directory(
+                uploader=uploader,
+                directory=gpx_path,
+                activity_type=args.activity_type,
+                name=args.name,
+                description=args.description,
+                private=args.private,
+                trainer=args.trainer,
+                commute=args.commute,
+                timeout=args.poll_timeout,
+                year=args.year,
+                json_dir=json_dir,
+                skip_metadata_update=args.skip_metadata_update,
+                wait_timeout=args.wait_timeout,
+            )
+            
+            # Summary
+            total = success_count + failure_count
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Upload Summary:")
+            logger.info(f"  Successful: {success_count}/{total}")
+            logger.info(f"  Failed: {failure_count}/{total}")
+            logger.info(f"{'='*60}")
+            
+            return 0 if failure_count == 0 else 1
+            
+        else:
+            success = upload_single_file(
+                uploader=uploader,
+                gpx_path=gpx_path,
+                activity_type=args.activity_type,
+                name=args.name,
+                description=args.description,
+                private=args.private,
+                trainer=args.trainer,
+                commute=args.commute,
+                timeout=args.poll_timeout,
+                json_dir=json_dir,
+                skip_metadata_update=args.skip_metadata_update,
+                wait_timeout=args.wait_timeout,
+            )
+            
+            return 0 if success else 1
+            
+    except KeyboardInterrupt:
+        logger.warning("\n\nUpload interrupted by user")
+        return 130
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
