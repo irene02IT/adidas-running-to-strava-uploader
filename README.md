@@ -357,6 +357,7 @@ The repo has evident limits. Feel free to make the use you want :)
 
 ## License
 
+MIT -
 This script is provided as-is for personal use. Strava API usage must comply with [Strava's API Agreement](https://www.strava.com/legal/api).
 
 ## Credits
