@@ -28,7 +28,7 @@ pip install requests
 3. Make the script executable (optional):
 
 ```bash
-chmod +x strava_upload_final.py
+chmod +x upload_file.py
 ```
 
 ## Getting a Strava Access Token
@@ -61,24 +61,24 @@ curl -X POST https://www.strava.com/oauth/token \
 
 ```bash
 # Upload a single GPX file
-python3 strava_upload_final.py /path/to/file.gpx --access-token YOUR_TOKEN
+python3 upload_file.py /path/to/file.gpx --access-token YOUR_TOKEN
 
 # Upload all GPX files in a directory
-python3 strava_upload_final.py /path/to/directory --access-token YOUR_TOKEN
+python3 upload_file.py /path/to/directory --access-token YOUR_TOKEN
 ```
 
 ### Upload with Year Filter
 
 ```bash
 # Upload only 2015 activities
-python3 strava_upload_final.py ./Sport-sessions/GPS-data --year 2015 --access-token YOUR_TOKEN
+python3 upload_file.py ./Sport-sessions/GPS-data --year 2015 --access-token YOUR_TOKEN
 ```
 
 ### Upload with Activity Type Inference
 
 ```bash
 # Automatically detect activity type from Runtastic JSON files
-python3 strava_upload_final.py ./Sport-sessions/GPS-data \
+python3 upload_file.py ./Sport-sessions/GPS-data \
   --year 2015 \
   --json-dir ./Sport-sessions \
   --access-token YOUR_TOKEN
@@ -88,7 +88,7 @@ python3 strava_upload_final.py ./Sport-sessions/GPS-data \
 
 ```bash
 # Custom name, description, and skip gear update
-python3 strava_upload_final.py file.gpx \
+python3 upload_file.py file.gpx \
   --name "Morning Run" \
   --description "Great weather!" \
   --skip-metadata-update \
@@ -99,7 +99,7 @@ python3 strava_upload_final.py file.gpx \
 
 ```bash
 # Enable verbose logging to see all API responses
-python3 strava_upload_final.py ./Sport-sessions/GPS-data \
+python3 upload_file.py ./Sport-sessions/GPS-data \
   --year 2015 \
   --access-token YOUR_TOKEN \
   --verbose
@@ -112,7 +112,7 @@ python3 strava_upload_final.py ./Sport-sessions/GPS-data \
 export STRAVA_ACCESS_TOKEN=your_token_here
 
 # Now you don't need to specify --access-token
-python3 strava_upload_final.py ./Sport-sessions/GPS-data --year 2015
+python3 upload_file.py ./Sport-sessions/GPS-data --year 2015
 ```
 
 ## Command Line Options
@@ -198,12 +198,12 @@ If activities don't become available within the timeout:
 **Solutions:**
 ```bash
 # Increase timeout to 3 minutes
-python3 strava_upload_final.py ./Sport-sessions/GPS-data \
+python3 upload_file.py ./Sport-sessions/GPS-data \
   --wait-timeout 180 \
   --access-token YOUR_TOKEN
 
 # Or skip gear update entirely (faster)
-python3 strava_upload_final.py ./Sport-sessions/GPS-data \
+python3 upload_file.py ./Sport-sessions/GPS-data \
   --skip-metadata-update \
   --access-token YOUR_TOKEN
 ```
@@ -231,7 +231,7 @@ The script looks for matching JSON files to infer activity type:
 ### Example 1: Upload All 2024 Activities
 
 ```bash
-python3 strava_upload_final.py ./Sport-sessions/GPS-data \
+python3 upload_file.py ./Sport-sessions/GPS-data \
   --year 2024 \
   --json-dir ./Sport-sessions \
   --access-token cc23f3f735ddb4454c9f979ccea953e3071697d3
@@ -264,7 +264,7 @@ Upload Summary:
 ### Example 2: Upload Single File with Custom Name
 
 ```bash
-python3 strava_upload_final.py my-run.gpx \
+python3 upload_file.py my-run.gpx \
   --name "Morning 10K" \
   --description "Personal best!" \
   --activity-type Run \
@@ -275,7 +275,7 @@ python3 strava_upload_final.py my-run.gpx \
 
 ```bash
 # Upload 500 activities without waiting for gear update
-python3 strava_upload_final.py ./Sport-sessions/GPS-data \
+python3 upload_file.py ./Sport-sessions/GPS-data \
   --skip-metadata-update \
   --access-token YOUR_TOKEN
 ```
@@ -284,7 +284,7 @@ python3 strava_upload_final.py ./Sport-sessions/GPS-data \
 
 ```bash
 # Enable verbose mode to see all API responses
-python3 strava_upload_final.py problematic-file.gpx \
+python3 upload_file.py problematic-file.gpx \
   --verbose \
   --access-token YOUR_TOKEN
 ```
